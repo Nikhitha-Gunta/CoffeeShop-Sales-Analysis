@@ -1,0 +1,284 @@
+---
+title: "Coffee Shop comprehensive analysis"
+date: "2024-04-28"
+output: pdf_document
+---
+
+```{r}
+
+# Load necessary libraries
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(caret)
+library(forecast)
+library(tseries)
+
+# Read the data
+sales_Original_data <- read_excel("E:/R Final Project/Coffee Shop Sales.xlsx")
+```
+
+## Data Cleaning
+
+```{r}
+
+########################### Data cleaning ################################
+
+#Checking the dataset
+colnames(sales_Original_data)
+head(sales_Original_data)
+summary(sales_Original_data)
+str(sales_Original_data)
+
+sales_data <- sales_Original_data
+
+# This converts the transaction_time to a character, extracts the time part, and then converts it to a POSIXct time format.
+sales_data$transaction_time <- format(as.POSIXct(substr(as.character(sales_data$transaction_time), 12, 19), format = "%H:%M:%S"), "%T")
+
+# Standardize text columns
+sales_data$store_location <- tolower(sales_data$store_location)
+sales_data$product_category <- tolower(sales_data$product_category)
+sales_data$product_type <- tolower(sales_data$product_type)
+sales_data$product_detail <- tolower(sales_data$product_detail)
+
+
+# Handle numerical variables that should be categorical
+sales_data$store_id <- as.factor(sales_data$store_id)
+sales_data$product_id <- as.factor(sales_data$product_id)
+
+# Check for and remove duplicate rows 
+sales_data <- sales_data %>%
+  distinct()
+
+#Combining columns
+sales_data <- sales_data %>%
+  unite(product_detail, product_type, product_detail, sep = " - ")
+
+# Creating a new column 'Total_Sales' by multiplying 'unit_price' and 'transaction_qty'
+sales_data <- sales_data %>%
+  mutate(Total_Sales = unit_price * transaction_qty)
+
+# View the first few rows to confirm the new column has been added
+head(sales_data)
+
+```
+
+## Data Visualization
+
+```{r}
+
+###############################Data Visualization#############################
+
+```
+
+```{r Pie Chart-plot, fig.cap="\"Bakery\"  seems to be the largest category, indicating it has the highest sales compared to the others."}
+
+# Calculating sums of Total_Sales for each product_type
+product_sales <- sales_data %>%
+  group_by(product_category) %>%
+  summarise(Total_Sales = sum(Total_Sales)) %>%
+  ungroup()
+
+
+#Pie Chart
+ggplot(product_sales, aes(x = "", y = Total_Sales, fill = product_category)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  labs(fill = "Product Type",
+       title = "Total sales for each product category")
+
+```
+
+```{r unit price-plot, fig.cap="There appears to be a high concentration of unit prices in the lower range, close to the minimum price point, which suggests that most of the products are priced on the lower end of the scale. There are products with higher unit prices, but they are much less frequent as indicated by the single bars further along the x-axis."}
+
+
+# To understand the distribution of 'unit_price'
+ggplot(sales_data, aes(x = unit_price)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  labs(title = "Distribution of Unit Prices",
+       x = "Unit Price",
+       y = "Count") +
+  theme_minimal()
+
+```
+
+
+```{r plot, fig.cap=" The chart ranks products from most to least sold, with brewed black tea - earl grey rg being the highest-selling product."}
+
+# Summarize data to find the total quantity sold and total revenue per product
+product_sales_summary <- sales_data %>%
+  group_by(product_detail) %>%
+  summarise(
+    Total_Quantity = sum(transaction_qty),
+    Total_Revenue = sum(Total_Sales),
+    .groups = 'drop'
+  ) 
+
+# Sort to find the most and least sold products
+most_sold_products <- product_sales_summary %>%
+  arrange(desc(Total_Quantity))
+
+
+least_sold_products <- product_sales_summary %>%
+  arrange(Total_Quantity)
+
+
+# Sort to find which products generate the most and least revenue
+most_revenue_products <- product_sales_summary %>%
+  arrange(desc(Total_Revenue))
+
+least_revenue_products <- product_sales_summary %>%
+  arrange(Total_Revenue)
+
+
+# Plotting the top 10 products by quantity sold
+
+ggplot(most_sold_products[1:10,], aes(x = reorder(product_detail, Total_Quantity), y = Total_Quantity)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Use a single color for all bars
+  coord_flip() +  # Horizontal bars
+  labs(title = "Top 10 Most Sold Products",
+       x = "Product",
+       y = "Total Quantity Sold") +  # Remove the y-axis label as the product names are clear
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove the legend
+
+```
+
+```{r Plot,fig.cap="The product generating the most revenue is hot chocolate - sustainably grown organic lg." }
+
+# Plotting the top 10 products by revenue
+ggplot(most_revenue_products[1:10,], aes(x = reorder(product_detail, Total_Revenue), y = Total_Revenue)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Use a single color for all bars
+  coord_flip() +  # Horizontal bars
+  labs(title = "Top 10 Products by Revenue",
+       x = "Product",
+       y = "Total Revenue") +  # Remove the y-axis label as the product names are clear
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove the legend
+
+```
+
+```{r fig.cap=" Transaction volume start low at the beginning of the year, gradually increasing until June, possibly due to seasonal trends."}
+
+# Aggregate the weekly quantity sold
+weekly_qty_sold <- sales_data %>%
+  group_by(Week = floor_date(transaction_date, "week")) %>%
+  summarise(Weekly_Quantity = sum(transaction_qty), .groups = 'drop')
+
+# Line chart for weekly quantity sold over time
+ggplot(weekly_qty_sold, aes(x = Week, y = Weekly_Quantity)) +
+  geom_line(color = "steelblue") +  # Use a line to connect the points
+  labs(title = "Weekly Quantity of Transactions Over Time",
+       x = "Week",
+       y = "Quantity Sold") +
+  theme_minimal()
+
+```
+
+
+## Data Modeling
+
+#We start our data modeling by preparing the daily sales data for time series analysis.
+
+```{r}
+
+###################Data modeling###########################
+
+# Convert 'transaction_date' to a Date type if it isn't already
+sales_data$transaction_date <- as.Date(sales_data$transaction_date)
+
+# Aggregate sales data by date to get daily total sales
+daily_sales <- sales_data %>%
+  group_by(transaction_date) %>%
+  summarise(Daily_Total_Sales = sum(Total_Sales), .groups = 'drop')
+
+```
+
+#Next, we create a ts object for our time series analysis and check for stationarity using the Augmented Dickey-Fuller Test.
+
+```{r}
+# Create a time series object from the daily sales totals
+ts_sales <- ts(daily_sales$Daily_Total_Sales, frequency = 1)
+
+
+# Check for stationarity; if the p-value is less than a significance level (e.g., 0.05), the series is considered stationary
+adf_test_result <- adf.test(ts_sales)
+
+```
+
+#Based on the ADF test result, if our p-value is above 0.05, we perform differencing to achieve stationarity and retest.
+
+```{r}
+
+if(adf_test_result$p.value > 0.05) {
+  ts_sales_diff <- diff(ts_sales)
+  # Redo the stationarity test on the differenced data
+  adf_test_result_diff <- adf.test(ts_sales_diff)
+}
+
+```
+
+#Now we can fit an ARIMA model to our possibly differenced time series data using the auto.arima() function, which automatically selects the best fitting model.
+
+```{r}
+# Use the (differenced) series to fit an ARIMA model
+# The auto.arima function will determine whether differencing is needed, so we can pass the original series
+best_fit <- auto.arima(ts_sales)
+
+```
+
+#With our model ready, we now forecast the next 30 days of sales.
+
+```{r}
+
+# Forecast the next period (e.g., the next 30 days)
+forecasted_sales <- forecast(best_fit, h = 30)
+
+
+# Plot the forecast
+plot(forecasted_sales)
+
+```
+
+#The blue line starting where the observed data ends represents the forecasted values from the ARIMA model. The fact that the model includes 'drift' suggests that there's a trend component in the data that the model is picking up on, which allows the forecast to move upwards or downwards over time rather than staying flat.
+
+#To ensure our model is reliable, we look at the fitted values versus the observed values.
+
+```{r}
+# fitted ARIMA model
+fitted_values <- fitted(best_fit)
+
+# Create a time series plot comparing the observed and fitted values
+plot(ts_sales, main="Observed vs Fitted Values", col="blue")
+lines(fitted_values, col="red")
+legend("topright", legend=c("Observed", "Fitted"), col=c("blue", "red"), lty=1)
+
+```
+
+#The plot above compares the actual daily sales against the sales estimated by our model. There is close alignment between the two lines which suggests a good model fit to the historical data.
+
+#We also examine the residuals of our model to check for any patterns that could suggest model inadequacies.
+
+```{r}
+
+# Calculate residuals
+residuals <- residuals(best_fit)
+
+# Basic plot of residuals
+plot(residuals, main="Residuals from ARIMA Model", ylab="Residuals")
+abline(h=0, col="red")
+
+
+# ACF and PACF plots to check for autocorrelation in residuals
+Acf(residuals, main="ACF of Residuals")
+Pacf(residuals, main="PACF of Residuals")
+
+
+```
+
+#Autocorrelation plots (ACF and PACF) of residuals of time series model can provide valuable information about the data and model fit.the PACF and ACF of the residuals from time series model appears to be indicative of a good fit, as there are no significant correlations at any lag.
+
+
